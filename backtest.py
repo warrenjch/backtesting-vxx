@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import os
 from datetime import date, datetime, timedelta
@@ -9,7 +10,7 @@ warnings.simplefilter('ignore')
 directory = '.\data'
 df_dict = {}
 
-
+#'''
 for f in os.listdir(directory):
     if f.endswith('.csv'):
         raw_df = (pd.read_csv(f'{directory}\{f}', skipinitialspace=True))
@@ -19,14 +20,22 @@ for f in os.listdir(directory):
         df_dict[f'{os.path.splitext(f)[0][-6:]}'] = df
 '''
 #FOR TESTING
-raw_df = (pd.read_csv('.\data\\uvxy_eod_201602.csv', skipinitialspace=True))
-cols = ['[QUOTE_DATE]','[UNDERLYING_LAST]','[EXPIRE_DATE]','[DTE]','[C_BID]','[C_ASK]','[STRIKE]','[P_BID]','[P_ASK]','[STRIKE_DISTANCE]','[STRIKE_DISTANCE_PCT]']
-raw_df[cols] = raw_df[cols].fillna(0) #TO CHANGE IF IT CAUSES CALC ERRORS
-df = raw_df[cols]
-df_dict['201602'] = df
+n=0
+for f in os.listdir(directory):
+    if f.endswith('.csv'):
+        raw_df = (pd.read_csv(f'{directory}\{f}', skipinitialspace=True))
+        cols = ['[QUOTE_DATE]','[UNDERLYING_LAST]','[EXPIRE_DATE]','[DTE]','[C_BID]','[C_ASK]','[STRIKE]','[P_BID]','[P_ASK]','[STRIKE_DISTANCE]','[STRIKE_DISTANCE_PCT]']
+        raw_df[cols] = raw_df[cols].fillna(0) #TO CHANGE IF IT CAUSES CALC ERRORS
+        df = raw_df[cols]
+        df_dict[f'{os.path.splitext(f)[0][-6:]}'] = df
+    n+=1
+    if n==6:
+        break
 '''
 print('dfs loaded')
 
+#vars
+rf = 0.01
 #auxiliary functions
 def adddate(d1: str, diff: int):
     d2 = date.fromisoformat(d1)+timedelta(diff)
@@ -35,6 +44,18 @@ def adddate(d1: str, diff: int):
 def datediff(start: str, end: str):
     k = date.fromisoformat(end) - date.fromisoformat(start)
     return k.days
+
+def sharpe(ts, rf = rf, N = 255):
+    pct = ts.pct_change(1)
+    mu = pct.mean() * N -rf
+    sigma = pct.std() * np.sqrt(N)
+    return round(mu/sigma,5)
+
+def sortino(ts, rf = rf, N = 255):
+    pct = ts.pct_change(1)
+    mu = pct.mean() * N -rf
+    sigma = pct[pct<0].std()*np.sqrt(N)
+    return round(mu/sigma,5)
 
 class Portfolio:
     def __init__(self, cash = 10000):
@@ -53,7 +74,7 @@ class Portfolio:
             currentprice = (s['[P_BID]'] + s['[P_ASK]']) / 2
         if len(currentprice) != 0:
             instrument.loc['CURRENT_PRICE'] = currentprice
-        instrument.loc['PNL'] = (instrument['QUANTITY']*(instrument['CURRENT_PRICE']-instrument['AVG_PRICE'])).item()
+        instrument.loc['PNL'] = (instrument['QUANTITY']*(instrument['CURRENT_PRICE'])).item()
         return instrument
     def updatepnl(self,day,daychain):
         if self.portfolio['INSTRUMENT'].tolist() != []:
@@ -61,16 +82,17 @@ class Portfolio:
             i = self.portfolio[cond].index
             if len(i.tolist()) != 0:
                 #print(day, i, '\n', self.portfolio.loc[i, ['INSTRUMENT', 'PNL']]) #TODO REMOVE THIS SHIT
-                self.cash += self.portfolio.loc[i,'CURRENT_PRICE'].dot(self.portfolio.loc[i,'QUANTITY']).item()
+                pi = self.portfolio.loc[i,'CURRENT_PRICE'].dot(self.portfolio.loc[i,'QUANTITY']).item()
+                self.cash += pi
+                self.unrealized -= pi
             self.portfolio = self.portfolio.drop(i)
         self.portfolio = self.portfolio.apply(lambda row: self.calcpnl(row,day,daychain),axis=1)
-        if self.portfolio['PNL'].tolist() == []:
-            self.unrealized = round(self.cash,2)
-        else:
-            self.unrealized = round(self.cash + self.portfolio['PNL'].sum(),2)
+        if self.portfolio['PNL'].tolist() != []:
+            self.unrealized = round(self.portfolio['PNL'].sum(),2)
 
     def trade(self, instrument, quantity, price):
         self.cash -= quantity*price
+        self.unrealized += quantity*price
         i = self.portfolio.index[self.portfolio['INSTRUMENT'] == instrument].tolist()
         if len(i) > 1:
             raise ValueError('SUM TING WONG')
@@ -90,15 +112,13 @@ class Portfolio:
 class Strategy:
     def __init__(self, strat='put', rollfreq='1m', strikedistance=0.2, pctcash=0.2):
         strats = ['put', 'calendar']
-        rollfreqs = ['1w','2w','3w','1m','2m','3m']
+        rollfreqs = {'1w':7,'2w':14,'3w':21,'1m':28,'2m':56,'3m':84}
         self.strat = strat
-        self.rollfreq = rollfreq
-        self.sd = strikedistance
-        self.pctcash = pctcash #TODO KELLY CRITERION
         if self.strat not in strats:
             raise ValueError(f'supported strats include {strats}')
-        if self.rollfreq not in rollfreqs:
-            raise ValueError(f'supported roll frequencies include {rollfreqs}')
+        self.rollfreq = rollfreqs[rollfreq]
+        self.sd = strikedistance
+        self.pctcash = pctcash #TODO KELLY CRITERION
 
     def findprice(self,df,inst):
         item = df[(df['[STRIKE]'] == inst[0]) & (df['[DTE]'] == inst[2])]
@@ -120,35 +140,61 @@ class Strategy:
     def backtest(self):
         results = []
         startdate = date.fromisoformat(df_dict['201601']['[QUOTE_DATE]'][0])
-        #enddate = date.fromisoformat(df_dict['201602']['[QUOTE_DATE]'].iat[-1])
+        #enddate = date.fromisoformat(df_dict['201605']['[QUOTE_DATE]'].iat[-1])
         enddate = date.fromisoformat(df_dict['202312']['[QUOTE_DATE]'].iat[-1])
-        exp_1m_raw = pd.date_range(startdate, enddate, freq='WOM-3FRI')
-        self.exp_1m = pd.DataFrame()
-        self.exp_1m['date'] = exp_1m_raw.date
-        self.exp_1m['yearmonth'] = self.exp_1m['date'].apply(lambda x: x.strftime('%Y%m'))
+        if self.rollfreq == 7:
+            exp_1w_raw = pd.date_range(startdate, enddate, freq='W-FRI')
+            self.exp = pd.DataFrame()
+            self.exp['date'] = exp_1w_raw.date
+            self.exp['yearmonth'] = self.exp['date'].apply(lambda x: x.strftime('%Y%m'))
+        elif self.rollfreq == 28:
+            exp_1m_raw = pd.date_range(startdate, enddate, freq='WOM-3FRI')
+            self.exp = pd.DataFrame()
+            self.exp['date'] = exp_1m_raw.date
+            self.exp['yearmonth'] = self.exp['date'].apply(lambda x: x.strftime('%Y%m'))
+
         self.portfolio = Portfolio()
-        for index, row in self.exp_1m.iterrows():
-            df = df_dict[row['yearmonth']]
+        for month in self.exp['yearmonth'].unique().tolist():
+            df = df_dict[month]
             for day in df['[QUOTE_DATE]'].unique().tolist():
                 daychain = df[df['[QUOTE_DATE]'] == day]
-                if date.fromisoformat(day) == row['date']:
-                    dte = self.closestdte(daychain,28)
+                if date.fromisoformat(day) in self.exp['date'].tolist():
+                    dte = self.closestdte(daychain,self.rollfreq)
                     sp = self.closeststrike(daychain,dte)
                     spot = daychain['[UNDERLYING_LAST]'].unique()[0]
-                    order = [sp,'put',dte,'buy'] #TODO DATETIME PROGRAMMING, PUT EXPIRY DATE AND CALC
-                    self.portfolio.trade(f'{order[0]},{order[1]},{adddate(day,order[2])}',
+                    order = [sp,'put',dte,'buy']
+                    self.portfolio.trade(f'{sp},{order[1]},{adddate(day,dte)}',
                                          round(self.portfolio.cash*self.pctcash/spot),
                                          self.findprice(daychain,order))
                 self.portfolio.updatepnl(day,daychain)
-                results.append(pd.DataFrame({'date':[day], 'pnl':[self.portfolio.unrealized]}))
+                results.append(pd.DataFrame({'date':[day], 'pnl':[self.portfolio.cash + self.portfolio.unrealized]}))
         self.resultdf = pd.concat(results)
-        print(self.resultdf.tail(5))
 
+#main loop
+'''
+std = 0.5
 
-for i in [0.05,0.3,0.5]:
-    strategy = Strategy(strikedistance=i,pctcash=.4)
-    strategy.backtest()
-    plt.plot(strategy.resultdf['date'],strategy.resultdf['pnl'],label=f'yolo%={i}')
+strategy1 = Strategy(strikedistance=std,pctcash=.4)
+strategy1.backtest()
+pnl1 = strategy1.resultdf['pnl']
+sharpe1 = sharpe(pnl1)
+sortino1 = sortino(pnl1)
+plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} freq=1m sharpe={sharpe1} sortino={sortino1}')
+
+strategy2 = Strategy(strikedistance=std,pctcash=.1,rollfreq='1w')
+strategy2.backtest()
+pnl2 = strategy2.resultdf['pnl']
+sharpe2 = sharpe(pnl2)
+sortino2 = sortino(pnl2)
+plt.plot(strategy2.resultdf['date'],pnl2,label=f'itm%={std} freq=1w sharpe={sharpe2} sortino={sortino2}')
+'''
+for std in [0.1,1]:
+    strategy2 = Strategy(strikedistance=std, pctcash=.1, rollfreq='1w')
+    strategy2.backtest()
+    pnl2 = strategy2.resultdf['pnl']
+    sharpe2 = sharpe(pnl2)
+    sortino2 = sortino(pnl2)
+    plt.plot(strategy2.resultdf['date'], pnl2, label=f'itm%={std} freq=1w sharpe={sharpe2} sortino={sortino2}')
 
 plt.xticks(['2016-01-04','2017-01-03','2018-01-02','2019-01-02','2020-01-02','2021-01-04','2022-01-03','2023-01-03'])
 plt.legend()
