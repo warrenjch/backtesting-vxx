@@ -73,20 +73,19 @@ class Portfolio:
         elif inst[1] == 'put':
             currentprice = (s['[P_BID]'] + s['[P_ASK]']) / 2
         if len(currentprice) != 0:
-            instrument.loc['CURRENT_PRICE'] = currentprice
-        instrument.loc['PNL'] = (instrument['QUANTITY']*(instrument['CURRENT_PRICE'])).item()
+            instrument.loc['CURRENT_PRICE'] = currentprice.item()
+        instrument.loc['PNL'] = (instrument['QUANTITY']*(instrument['CURRENT_PRICE']))
         return instrument
     def updatepnl(self,day,daychain):
+        self.portfolio = self.portfolio.apply(lambda row: self.calcpnl(row, day, daychain), axis=1)
         if self.portfolio['INSTRUMENT'].tolist() != []:
             cond = self.portfolio['INSTRUMENT'].str.split(',').str[2].apply(lambda row: datediff(day,row)<=0)
             i = self.portfolio[cond].index
             if len(i.tolist()) != 0:
-                #print(day, i, '\n', self.portfolio.loc[i, ['INSTRUMENT', 'PNL']]) #TODO REMOVE THIS SHIT
                 pi = self.portfolio.loc[i,'CURRENT_PRICE'].dot(self.portfolio.loc[i,'QUANTITY']).item()
                 self.cash += pi
                 self.unrealized -= pi
             self.portfolio = self.portfolio.drop(i)
-        self.portfolio = self.portfolio.apply(lambda row: self.calcpnl(row,day,daychain),axis=1)
         if self.portfolio['PNL'].tolist() != []:
             self.unrealized = round(self.portfolio['PNL'].sum(),2)
 
@@ -109,7 +108,7 @@ class Portfolio:
                    'QUANTITY':quantity,
                    'AVG_PRICE':price,
                    'CURRENT_PRICE':price,
-                   'PNL':0}
+                   'PNL':quantity*price}
             self.portfolio = pd.concat([self.portfolio,pd.DataFrame.from_dict([row])],ignore_index=True)
 
 class Strategy:
@@ -126,11 +125,15 @@ class Strategy:
 
     def findprice(self,df,inst):
         item = df[(df['[STRIKE]'] == inst[0]) & (df['[DTE]'] == inst[2])]
+        '''
         dict = {('call','buy'):item['[C_ASK]'].item(),
                 ('call','sell'):item['[C_BID]'].item(),
                 ('put','buy'):item['[P_ASK]'].item(),
                 ('put','sell'):item['[P_BID]'].item()}
-        return dict[(inst[1],inst[3])]
+        return dict[(inst[1],inst[3])] ''' #TODO: weighted midprice?
+        dict = {'call': (item['[C_ASK]'].item()+item['[C_BID]'].item())/2,
+                'put': (item['[P_ASK]'].item()+item['[P_BID]'].item())/2}
+        return dict[inst[1]]
     def closeststrike(self,daychain,dte): #CURRENTLY ONLY SUPPORTS ITM PUT
         daychain['diff'] = abs(daychain['[STRIKE_DISTANCE_PCT]'] - self.sd)
         underlying = daychain['[UNDERLYING_LAST]'].iloc[0]
@@ -181,38 +184,41 @@ class Strategy:
                     sp = self.closeststrike(daychain,dte)
                     spot = daychain['[UNDERLYING_LAST]'].unique()[0]
                     order = [sp,'put',dte,'buy']
+                    p = self.findprice(daychain,order)
                     self.portfolio.trade(f'{sp},{order[1]},{adddate(day,dte)}',
-                                         round(self.portfolio.cash*self.pctcash/spot),
-                                         self.findprice(daychain,order))
+                                         round(self.portfolio.cash*self.pctcash/(100*p))*100,
+                                         p)
                 self.portfolio.updatepnl(day,daychain)
                 results.append(pd.DataFrame({'date':[day], 'pnl':[self.portfolio.cash + self.portfolio.unrealized]}))
         self.resultdf = pd.concat(results)
 
 #main loop
-'''
-std = 0.5
+std=0.3
 
-strategy1 = Strategy(strikedistance=std,pctcash=.4)
+strategy1 = Strategy(strikedistance=std,pctcash=0.4)
 strategy1.backtest()
 pnl1 = strategy1.resultdf['pnl']
 sharpe1 = sharpe(pnl1)
 sortino1 = sortino(pnl1)
-plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} freq=1m sharpe={sharpe1} sortino={sortino1}')
+cagr1 = round((pnl1.iloc[-1]/pnl1.iloc[0])**(1/8)-1,5)
+plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} cash%=0.4 freq=1m trade=1m sharpe={sharpe1} sortino={sortino1} cagr={cagr1}')
 
-strategy2 = Strategy(strikedistance=std,pctcash=.1,rollfreq='1w')
+strategy2 = Strategy(strikedistance=std,pctcash=0.2,rollfreq='1w',buydte=7)
 strategy2.backtest()
 pnl2 = strategy2.resultdf['pnl']
 sharpe2 = sharpe(pnl2)
 sortino2 = sortino(pnl2)
-plt.plot(strategy2.resultdf['date'],pnl2,label=f'itm%={std} freq=1w sharpe={sharpe2} sortino={sortino2}')
+cagr2 = round((pnl2.iloc[-1]/pnl2.iloc[0])**(1/8)-1,5)
+plt.plot(strategy2.resultdf['date'],pnl2,label=f'itm%={std} cash%=0.2 freq=1w trade=1w sharpe={sharpe2} sortino={sortino2} cagr={cagr2}')
 '''
-for buydte in [7,28]:
-    strategy2 = Strategy(strikedistance=0.1, pctcash=.2, rollfreq='1w',buydte=buydte)
-    strategy2.backtest()
-    pnl2 = strategy2.resultdf['pnl']
-    sharpe2 = sharpe(pnl2)
-    sortino2 = sortino(pnl2)
-    plt.plot(strategy2.resultdf['date'], pnl2, label=f'itm%=0.1 rollfreq=1w dte={buydte} sharpe={sharpe2} sortino={sortino2}')
+strategy3 = Strategy(strikedistance=std,pctcash=0.1,rollfreq='1w')
+strategy3.backtest()
+pnl3 = strategy3.resultdf['pnl']
+sharpe3 = sharpe(pnl3)
+sortino3 = sortino(pnl3)
+cagr3 = round((pnl3.iloc[-1]/pnl3.iloc[0])**(1/8)-1,5)
+plt.plot(strategy3.resultdf['date'],pnl3,label=f'itm%={std} cash%=0.1 freq=1w trade=1m sharpe={sharpe3} sortino={sortino3} cagr={cagr3}')
+'''
 
 plt.xticks(['2016-01-04','2017-01-03','2018-01-02','2019-01-02','2020-01-02','2021-01-04','2022-01-03','2023-01-03'])
 plt.legend()
