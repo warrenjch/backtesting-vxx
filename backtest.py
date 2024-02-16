@@ -113,7 +113,7 @@ class Portfolio:
 
 class Strategy:
     def __init__(self, strat='put', rollfreq='1m', strikedistance=0.2, pctcash=0.2, buydte=28):
-        strats = ['put', 'calendar']
+        strats = ['put', 'straddle','strangle']
         rollfreqs = {'1w':7,'2w':14,'3w':21,'1m':28,'2m':56,'3m':84}
         self.strat = strat
         if self.strat not in strats:
@@ -130,19 +130,49 @@ class Strategy:
                 ('call','sell'):item['[C_BID]'].item(),
                 ('put','buy'):item['[P_ASK]'].item(),
                 ('put','sell'):item['[P_BID]'].item()}
-        return dict[(inst[1],inst[3])] ''' #TODO: weighted midprice?
+        return dict[(inst[1],inst[3])] ''' #TODO: weighted midprice? change inst[3] to sign(inst)
         dict = {'call': (item['[C_ASK]'].item()+item['[C_BID]'].item())/2,
                 'put': (item['[P_ASK]'].item()+item['[P_BID]'].item())/2}
         return dict[inst[1]]
-    def closeststrike(self,daychain,dte): #CURRENTLY ONLY SUPPORTS ITM PUT
-        daychain['diff'] = abs(daychain['[STRIKE_DISTANCE_PCT]'] - self.sd)
+    def closeststrike(self,daychain,dte,sd,moneyness='itm'): #CURRENTLY DOES NOT SUPPORT ATM
+        daychain['diff'] = abs(daychain['[STRIKE_DISTANCE_PCT]'] - sd)
         underlying = daychain['[UNDERLYING_LAST]'].iloc[0]
-        filtered = daychain[(daychain['[STRIKE]']>underlying) & (daychain['[DTE]'] == dte)]
+        if moneyness == 'itm':
+            filtered = daychain[(daychain['[STRIKE]']>underlying) & (daychain['[DTE]'] == dte)]
+        elif moneyness == 'otm':
+            filtered = daychain[(daychain['[STRIKE]']<underlying) & (daychain['[DTE]'] == dte)]
         i = filtered['diff'].idxmin()
         return daychain.loc[i,'[STRIKE]']
     def closestdte(self,daychain,dte):
         d = daychain['[DTE]'].unique()
         return int(min(d, key=lambda x:abs(x-dte)))
+
+    def buyrules(self,daychain):
+        #this is where the rules are defined
+        if self.strat == 'put':
+            dte = self.closestdte(daychain, self.buydte)
+            sp = self.closeststrike(daychain, dte, self.sd,'itm')
+            t = self.findprice(daychain, [sp, 'put', dte, 1])
+            qty = round(self.portfolio.cash * self.pctcash / (100 * t)) * 100
+            orders = [[sp, 'put', dte, qty]]
+        elif self.strat == 'straddle':
+            dte = self.closestdte(daychain, self.buydte)
+            sp = self.closeststrike(daychain, dte, self.sd,'itm')
+            p = self.findprice(daychain, [sp, 'put', dte, 1])
+            c = self.findprice(daychain, [sp, 'call', dte, 1])
+            t = p+c
+            qty = round(self.portfolio.cash * self.pctcash/(100*t))*100
+            orders = [[sp, 'put', dte, qty], [sp, 'call', dte, qty]]
+        elif self.strat == 'strangle':
+            dte = self.closestdte(daychain, self.buydte)
+            psp = self.closeststrike(daychain, dte, self.sd,'itm')
+            p = self.findprice(daychain, [psp, 'put', dte, 1])
+            csp = self.closeststrike(daychain, dte, self.sd*1.5, 'itm')
+            c = self.findprice(daychain, [csp, 'call', dte, 1])
+            t = p + c
+            qty = round(self.portfolio.cash * self.pctcash / (100 * t)) * 100
+            orders = [[psp, 'put', dte, qty], [csp, 'call', dte, qty]]
+        return orders
 
     def backtest(self):
         results = []
@@ -161,7 +191,6 @@ class Strategy:
             self.exp['yearmonth'] = self.exp['date'].apply(lambda x: x.strftime('%Y%m'))
 
         self.portfolio = Portfolio()
-        #set rules
         self.buydates = self.exp['date'].tolist()
         self.selldates = self.exp['date'].tolist()[1:]
         wtfdates = ['2018-09-21','2018-12-21','2019-03-01','2019-05-03','2019-05-17','2019-05-24','2019-06-07']
@@ -180,29 +209,26 @@ class Strategy:
                         if day not in wtfdates:
                             self.portfolio.trade(ins,qty,self.findprice(daychain, order))
                 if date.fromisoformat(day) in self.buydates:
-                    dte = self.closestdte(daychain,self.buydte)
-                    sp = self.closeststrike(daychain,dte)
-                    spot = daychain['[UNDERLYING_LAST]'].unique()[0]
-                    order = [sp,'put',dte,'buy']
-                    p = self.findprice(daychain,order)
-                    self.portfolio.trade(f'{sp},{order[1]},{adddate(day,dte)}',
-                                         round(self.portfolio.cash*self.pctcash/(100*p))*100,
-                                         p)
+                    orders = self.buyrules(daychain)
+                    for order in orders: #[sp, type, dte, qty]
+                        p = self.findprice(daychain,order)
+                        self.portfolio.trade(f'{order[0]},{order[1]},{adddate(day,order[2])}',
+                                         order[3],p)
                 self.portfolio.updatepnl(day,daychain)
                 results.append(pd.DataFrame({'date':[day], 'pnl':[self.portfolio.cash + self.portfolio.unrealized]}))
         self.resultdf = pd.concat(results)
 
 #main loop
-std=0.3
-
-strategy1 = Strategy(strikedistance=std,pctcash=0.4)
-strategy1.backtest()
-pnl1 = strategy1.resultdf['pnl']
-sharpe1 = sharpe(pnl1)
-sortino1 = sortino(pnl1)
-cagr1 = round((pnl1.iloc[-1]/pnl1.iloc[0])**(1/8)-1,5)
-plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} cash%=0.4 freq=1m trade=1m sharpe={sharpe1} sortino={sortino1} cagr={cagr1}')
-
+std=0.5
+for strat in ['put','straddle','strangle']:
+    strategy1 = Strategy(strikedistance=std,pctcash=0.2,strat=strat)
+    strategy1.backtest()
+    pnl1 = strategy1.resultdf['pnl']
+    sharpe1 = sharpe(pnl1)
+    sortino1 = sortino(pnl1)
+    cagr1 = round((pnl1.iloc[-1]/pnl1.iloc[0])**(1/8)-1,5)
+    plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} cash%=0.2 strat={strat} freq=1m trade=1m sharpe={sharpe1} sortino={sortino1} cagr={cagr1}')
+'''
 strategy2 = Strategy(strikedistance=std,pctcash=0.2,rollfreq='1w',buydte=7)
 strategy2.backtest()
 pnl2 = strategy2.resultdf['pnl']
@@ -210,7 +236,7 @@ sharpe2 = sharpe(pnl2)
 sortino2 = sortino(pnl2)
 cagr2 = round((pnl2.iloc[-1]/pnl2.iloc[0])**(1/8)-1,5)
 plt.plot(strategy2.resultdf['date'],pnl2,label=f'itm%={std} cash%=0.2 freq=1w trade=1w sharpe={sharpe2} sortino={sortino2} cagr={cagr2}')
-'''
+
 strategy3 = Strategy(strikedistance=std,pctcash=0.1,rollfreq='1w')
 strategy3.backtest()
 pnl3 = strategy3.resultdf['pnl']
