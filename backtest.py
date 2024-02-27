@@ -31,7 +31,7 @@ for f in os.listdir(directory):
     n+=1
     if n==6:
         break
-'''
+#'''
 print('dfs loaded')
 
 #vars
@@ -112,7 +112,7 @@ class Portfolio:
             self.portfolio = pd.concat([self.portfolio,pd.DataFrame.from_dict([row])],ignore_index=True)
 
 class Strategy:
-    def __init__(self, strat='put', rollfreq='1m', strikedistance=0.2, pctcash=0.2, buydte=28):
+    def __init__(self, strat='put', rollfreq='1m', strikedistance=0.2, pctcash=0.2, buydte=28, ratio=1):
         strats = ['put', 'straddle','strangle']
         rollfreqs = {'1w':7,'2w':14,'3w':21,'1m':28,'2m':56,'3m':84}
         self.strat = strat
@@ -122,6 +122,7 @@ class Strategy:
         self.sd = strikedistance
         self.pctcash = pctcash #TODO KELLY CRITERION
         self.buydte = buydte
+        self.ratio = ratio
 
     def findprice(self,df,inst):
         item = df[(df['[STRIKE]'] == inst[0]) & (df['[DTE]'] == inst[2])]
@@ -160,18 +161,22 @@ class Strategy:
             sp = self.closeststrike(daychain, dte, self.sd,'itm')
             p = self.findprice(daychain, [sp, 'put', dte, 1])
             c = self.findprice(daychain, [sp, 'call', dte, 1])
-            t = p+c
-            qty = round(self.portfolio.cash * self.pctcash/(100*t))*100
-            orders = [[sp, 'put', dte, qty], [sp, 'call', dte, qty]]
+            t = self.ratio*p+c
+            base = self.portfolio.cash * self.pctcash/t
+            cqty = round(base/100)*100
+            pqty = round(self.ratio*base/100)*100
+            orders = [[sp, 'put', dte, pqty], [sp, 'call', dte, cqty]]
         elif self.strat == 'strangle':
             dte = self.closestdte(daychain, self.buydte)
             psp = self.closeststrike(daychain, dte, self.sd,'itm')
             p = self.findprice(daychain, [psp, 'put', dte, 1])
             csp = self.closeststrike(daychain, dte, self.sd*1.5, 'itm')
             c = self.findprice(daychain, [csp, 'call', dte, 1])
-            t = p + c
-            qty = round(self.portfolio.cash * self.pctcash / (100 * t)) * 100
-            orders = [[psp, 'put', dte, qty], [csp, 'call', dte, qty]]
+            t = self.ratio*p + c
+            base = self.portfolio.cash * self.pctcash / t
+            cqty = round(base / 100) * 100
+            pqty = round(self.ratio * base / 100) * 100
+            orders = [[psp, 'put', dte, pqty], [csp, 'call', dte, cqty]]
         return orders
 
     def backtest(self):
@@ -220,14 +225,18 @@ class Strategy:
 
 #main loop
 std=0.5
-for strat in ['put','straddle','strangle']:
-    strategy1 = Strategy(strikedistance=std,pctcash=0.2,strat=strat)
+for s in [['put',1,'1m',0.2],['strangle',5,'1m',0.2]]:
+    strat = s[0]
+    ratio = s[1]
+    rollfreq = s[2]
+    pctcash = s[3]
+    strategy1 = Strategy(strikedistance=std,pctcash=pctcash,rollfreq=rollfreq,strat=strat,ratio=ratio)
     strategy1.backtest()
     pnl1 = strategy1.resultdf['pnl']
     sharpe1 = sharpe(pnl1)
     sortino1 = sortino(pnl1)
     cagr1 = round((pnl1.iloc[-1]/pnl1.iloc[0])**(1/8)-1,5)
-    plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm%={std} cash%=0.2 strat={strat} freq=1m trade=1m sharpe={sharpe1} sortino={sortino1} cagr={cagr1}')
+    plt.plot(strategy1.resultdf['date'],pnl1,label=f'itm:{std} cash%=0.2 {strat} p/c:{ratio} freq={rollfreq}/1m sh:{sharpe1} so:{sortino1} cagr={cagr1}')
 '''
 strategy2 = Strategy(strikedistance=std,pctcash=0.2,rollfreq='1w',buydte=7)
 strategy2.backtest()
